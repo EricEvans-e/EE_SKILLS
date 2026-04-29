@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT Image to SVG"
+  short_description: "Generate PPT visuals, then redraw editable SVGs"
+  default_prompt: "Use $ppt-image-to-svg to generate a polished PPT PNG and redraw it as a PowerPoint-editable SVG."
