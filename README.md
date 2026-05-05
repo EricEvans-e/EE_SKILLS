@@ -1,6 +1,6 @@
 # EE_SKILLS
 
-Eric 的个人 Codex 技能集。
+Eric 的个人技能集，同时兼容 Codex 和 Claude Code。
 
 ## 技能列表
 
@@ -16,7 +16,7 @@ Eric 的个人 Codex 技能集。
 
 ### read-image
 
-通过视觉模型（mimo-v2.5）桥接，读取和分析图片内容。
+通过独立配置的视觉 API（mimo-v2.5）读图，不依赖当前使用的对话模型。Codex / Claude Code 均可使用。
 
 适用场景：
 - 描述、分析图片内容；
@@ -26,16 +26,22 @@ Eric 的个人 Codex 技能集。
 
 支持格式：JPG / JPEG / PNG / GIF / WebP / BMP / TIFF。
 
+配置方式：编辑 `skills/read-image/config.yaml` 中的 `base_url` / `auth_token` / `model` 等字段即可适配不同 API。
+
 ## 安装
 
-将技能文件夹复制到 Codex skills 目录：
+### Codex
 
 ```powershell
-# ppt-image-to-svg
 Copy-Item -Recurse .\skills\ppt-image-to-svg "$env:USERPROFILE\.codex\skills\ppt-image-to-svg"
-
-# read-image
 Copy-Item -Recurse .\skills\read-image "$env:USERPROFILE\.codex\skills\read-image"
 ```
 
-安装后在 Codex 中通过技能名调用即可。
+### Claude Code
+
+```powershell
+Copy-Item -Recurse .\skills\ppt-image-to-svg "$env:USERPROFILE\.claude\skills\ppt-image-to-svg"
+Copy-Item -Recurse .\skills\read-image "$env:USERPROFILE\.claude\skills\read-image"
+```
+
+安装后在对话中通过技能名调用即可。
