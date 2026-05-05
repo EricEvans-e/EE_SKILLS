@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# read-image.sh — Call Anthropic API with a vision-capable model to analyze an image.
+# read-image.sh — Call a vision-capable API to analyze an image.
 # Usage: bash read-image.sh <image_path> [prompt]
 #
-# Requires: ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL env vars (or falls back to defaults).
+# Config: ./config.yaml (auto-generated on first run if missing)
+# Falls back to VISION_* / ANTHROPIC_* env vars when config is absent.
 
 set -euo pipefail
 
@@ -13,6 +14,9 @@ if [ ! -f "$IMAGE_PATH" ]; then
   echo "ERROR: File not found: $IMAGE_PATH" >&2
   exit 1
 fi
+
+# --- Find a working Python (once, for all later uses) ---
+_PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo '')"
 
 # --- Detect media type from extension ---
 EXT="${IMAGE_PATH##*.}"
@@ -33,34 +37,66 @@ esac
 
 # --- Base64 encode (cross-platform) ---
 if base64 -w 0 < /dev/null >/dev/null 2>&1; then
-  # GNU coreutils (Linux, Git Bash on Windows)
   IMAGE_B64="$(base64 -w 0 "$IMAGE_PATH")"
 elif command -v powershell.exe >/dev/null 2>&1; then
-  # Windows PowerShell fallback
-  IMAGE_B64="$(powershell.exe -Command "[Convert]::ToBase64String([IO.File]::ReadAllBytes('$(cygpath -w "$IMAGE_PATH")'))" | tr -d '\r')"
+  if command -v cygpath >/dev/null 2>&1; then
+    WIN_PATH="$(cygpath -w "$IMAGE_PATH")"
+  else
+    WIN_PATH="${IMAGE_PATH//\//\\}"
+  fi
+  IMAGE_B64="$(powershell.exe -Command "[Convert]::ToBase64String([IO.File]::ReadAllBytes('$WIN_PATH'))" | tr -d '\r')"
 else
-  # macOS / BSD base64 (no -w, wraps at 76 chars — API accepts this)
   IMAGE_B64="$(base64 < "$IMAGE_PATH" | tr -d '\n')"
 fi
 
-# --- API config ---
-BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-# Strip trailing slash
+# --- Load API config from YAML ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.yaml"
+
+if [ -f "$CONFIG_FILE" ] && [ -n "$_PY" ]; then
+  eval "$(cat "$CONFIG_FILE" | "$_PY" -c "
+import sys, re, shlex
+for line in sys.stdin:
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    m = re.match(r'^(\w+)\s*:\s*(.+)$', line)
+    if m:
+        key = m.group(1).upper()
+        val = m.group(2).strip().strip('\"').strip(\"'\")
+        print(f'{key}={shlex.quote(val)}')
+")"
+fi
+
+# --- Resolve final values (config > env > default) ---
+BASE_URL="${BASE_URL:-${VISION_BASE_URL:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}}"
 BASE_URL="${BASE_URL%/}"
-AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:?Set ANTHROPIC_AUTH_TOKEN in your environment}"
-VISION_MODEL="${VISION_MODEL:-mimo-v2.5}"
+AUTH_TOKEN="${AUTH_TOKEN:-${VISION_AUTH_TOKEN:-${ANTHROPIC_AUTH_TOKEN:?Set auth_token in config.yaml or ANTHROPIC_AUTH_TOKEN in env}}}"
+VISION_MODEL="${MODEL:-${VISION_MODEL:-mimo-v2.5}}"
+MAX_TOKENS="${MAX_TOKENS:-4096}"
+AUTH_HEADER="${AUTH_HEADER:-x-api-key: @TOKEN@}"
+API_VERSION="${API_VERSION:-2023-06-01}"
+
+# Expand @TOKEN@ placeholder in auth header
+AUTH_HEADER="${AUTH_HEADER//@TOKEN@/$AUTH_TOKEN}"
 
 # --- Build request JSON to temp file (avoids "arg list too long" on large images) ---
 TMPJSON="$(mktemp)"
-trap 'rm -f "$TMPJSON"' EXIT
+TMPRESP="$(mktemp)"
+trap 'rm -f "$TMPJSON" "$TMPRESP"' EXIT
 
 # Escape prompt for JSON embedding
-ESCAPED_PROMPT="$(printf '%s' "$PROMPT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo "\"$PROMPT\"")"
+if [ -n "$_PY" ]; then
+  ESCAPED_PROMPT="$(printf '%s' "$PROMPT" | "$_PY" -c 'import sys,json; print(json.dumps(sys.stdin.read()))')"
+else
+  # Rudimentary fallback: escape backslashes and double quotes
+  ESCAPED_PROMPT="\"$(printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g')\""
+fi
 
 cat > "$TMPJSON" <<JSONEOF
 {
   "model": "$VISION_MODEL",
-  "max_tokens": 4096,
+  "max_tokens": $MAX_TOKENS,
   "messages": [
     {
       "role": "user",
@@ -83,31 +119,27 @@ cat > "$TMPJSON" <<JSONEOF
 }
 JSONEOF
 
-# --- Call API (read JSON from file) ---
-RESPONSE="$(curl -sS --fail-with-body \
-  -X POST "${BASE_URL}/v1/messages" \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: ${AUTH_TOKEN}" \
-  -H "anthropic-version: 2023-06-01" \
-  -d "@$TMPJSON" \
-  --max-time 120)" || {
-    echo "ERROR: API call failed" >&2
-    echo "$RESPONSE" >&2
-    exit 1
-  }
+# --- Call API (portable: write body to file, capture HTTP status separately) ---
+CURL_ARGS=(-sS -X POST "${BASE_URL}/v1/messages")
+CURL_ARGS+=(-H "Content-Type: application/json")
+CURL_ARGS+=(-H "$AUTH_HEADER")
+if [ -n "$API_VERSION" ]; then
+  CURL_ARGS+=(-H "anthropic-version: $API_VERSION")
+fi
+CURL_ARGS+=(-d "@$TMPJSON" --max-time 120)
+
+HTTP_CODE=$(curl "${CURL_ARGS[@]}" -o "$TMPRESP" -w "%{http_code}")
+RESPONSE="$(cat "$TMPRESP")"
+
+if [ "$HTTP_CODE" -ge 400 ]; then
+  echo "ERROR: API call failed (HTTP $HTTP_CODE)" >&2
+  echo "$RESPONSE" >&2
+  exit 1
+fi
 
 # --- Extract text from response ---
-# Try python3 first, fallback to grep/sed
-if command -v python3 >/dev/null 2>&1; then
-  echo "$RESPONSE" | python3 -c "
-import sys, json
-resp = json.load(sys.stdin)
-for block in resp.get('content', []):
-    if block.get('type') == 'text':
-        print(block['text'])
-" 2>/dev/null || echo "$RESPONSE"
-elif command -v python >/dev/null 2>&1; then
-  echo "$RESPONSE" | python -c "
+if [ -n "$_PY" ]; then
+  echo "$RESPONSE" | "$_PY" -c "
 import sys, json
 resp = json.load(sys.stdin)
 for block in resp.get('content', []):
@@ -115,6 +147,6 @@ for block in resp.get('content', []):
         print(block['text'])
 " 2>/dev/null || echo "$RESPONSE"
 else
-  # Fallback: crude extraction
-  echo "$RESPONSE" | grep -oP '"text"\s*:\s*"\K[^"]*' | sed 's/\\n/\n/g'
+  # Portable fallback: sed-based extraction (no grep -P dependency)
+  echo "$RESPONSE" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"//p' | sed 's/"[[:space:]]*,[[:space:]]*"type".*//'
 fi

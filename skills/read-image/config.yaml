@@ -1,0 +1,14 @@
+# read-image 视觉 API 配置
+# 独立于 Claude Code 主模型，确保读图始终可用
+base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic"
+model: "mimo-v2.5"
+max_tokens: 4096
+
+# 鉴权方式：@TOKEN@ 会被替换为 auth_token 的值
+# Anthropic / Mimo 兼容: "x-api-key: @TOKEN@"
+# DeepSeek 兼容:         "Authorization: Bearer @TOKEN@"
+auth_header: "x-api-key: @TOKEN@"
+auth_token: "YOUR-APYKEY"
+
+# Anthropic API 版本，留空则不发送该 header
+api_version: "2023-06-01"
